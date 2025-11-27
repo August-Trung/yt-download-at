@@ -22,7 +22,6 @@ try {
 	const cookiesEnv = process.env.YOUTUBE_COOKIES;
 	if (cookiesEnv) {
 		const cookies = JSON.parse(cookiesEnv);
-		// Quan trọng: Không set keepAlive để tránh lỗi crash trên Render
 		agent = ytdl.createAgent(cookies);
 		console.log(`--> [INFO] Đã load Cookies thành công!`);
 	} else {
@@ -35,22 +34,30 @@ try {
 	agent = ytdl.createAgent();
 }
 
-// --- CHIẾN THUẬT RETRY (QUAN TRỌNG) ---
-// Hàm này sẽ thử lần lượt các cách để lấy thông tin video
+// --- CHIẾN THUẬT RETRY (Chia nhỏ để tăng tỉ lệ thành công) ---
 const getInfoWithRetry = async (url) => {
+	// Chia nhỏ từng Client ra để thử riêng biệt
 	const strategies = [
 		{
-			name: "Mobile Strategy (Android/iOS)",
-			options: { agent, playerClients: ["ANDROID", "IOS"] },
+			name: "1. Android Strategy",
+			options: { agent, playerClients: ["ANDROID"] },
 		},
 		{
-			name: "Web Strategy",
-			options: { agent, playerClients: ["WEB", "WEB_CREATOR"] },
+			name: "2. iOS Strategy",
+			options: { agent, playerClients: ["IOS"] },
 		},
 		{
-			name: "TV Embedded Strategy (No Cookies)",
-			// TV Embedded thường không cần cookies và ít bị Geo-block
+			name: "3. Web Creator Strategy",
+			options: { agent, playerClients: ["WEB_CREATOR"] },
+		},
+		{
+			name: "4. TV Embedded (No Cookies)",
+			// TV Embed thường là cứu cánh cuối cùng
 			options: { agent: undefined, playerClients: ["TV_EMBEDDED"] },
+		},
+		{
+			name: "5. Mweb (Mobile Web)",
+			options: { agent, playerClients: ["MWEB"] },
 		},
 	];
 
@@ -58,17 +65,21 @@ const getInfoWithRetry = async (url) => {
 
 	for (const strategy of strategies) {
 		try {
-			console.log(`--> Thử chiến thuật: ${strategy.name}...`);
+			console.log(`--> Đang thử: ${strategy.name}...`);
 			const info = await ytdl.getInfo(url, strategy.options);
-			return { info, strategy: strategy.name }; // Thành công trả về ngay
+			return { info, strategy: strategy.name }; // Thành công!
 		} catch (error) {
-			console.log(`   [FAIL] ${strategy.name}: ${error.message}`);
+			console.log(
+				`   [FAIL] ${strategy.name}: ${error.message.split("\n")[0]}`
+			);
 			lastError = error;
-			// Nếu lỗi là do video không tồn tại thì dừng luôn
-			if (error.message.includes("Video unavailable")) break;
+			if (error.message.includes("Video unavailable")) break; // Video die thật thì dừng
 		}
 	}
-	throw lastError || new Error("Mọi chiến thuật đều thất bại.");
+	throw (
+		lastError ||
+		new Error("Server quá tải hoặc bị YouTube chặn IP tạm thời.")
+	);
 };
 
 const formatTime = (seconds) => {
@@ -79,7 +90,7 @@ const formatTime = (seconds) => {
 
 // Health Check
 app.get("/", (req, res) => {
-	res.send("Server YT Downloader (Multi-Strategy V2.1) is running!");
+	res.send("Server YT Downloader (Granular Strategy V3.0) is running!");
 });
 
 // API Info
@@ -91,12 +102,11 @@ app.get("/api/info", async (req, res) => {
 		}
 
 		const { info, strategy } = await getInfoWithRetry(url);
-		console.log(`--> Thành công với: ${strategy}`);
+		console.log(`--> [SUCCESS] Lấy info thành công bằng: ${strategy}`);
 
 		const thumbnails = info.videoDetails.thumbnails;
 		const thumbnail = thumbnails[thumbnails.length - 1].url;
 
-		// Xử lý Captions
 		let scriptContent = "";
 		try {
 			const tracks =
@@ -152,7 +162,7 @@ app.get("/api/info", async (req, res) => {
 		const status = error.message.includes("Sign in") ? 403 : 500;
 		res.status(status).json({
 			error: error.message.includes("Sign in")
-				? "Server bị YouTube chặn hoàn toàn (403). Vui lòng cập nhật Cookies mới."
+				? "Server bị chặn (403). Vui lòng thử lại sau ít phút."
 				: "Lỗi Server: " + error.message,
 		});
 	}
@@ -185,7 +195,7 @@ app.get("/api/playlist", async (req, res) => {
 	}
 });
 
-// --- API: Tải xuống (Đã sửa logic) ---
+// --- API: Tải xuống (Dùng downloadFromInfo) ---
 app.get("/api/download", async (req, res) => {
 	try {
 		const { url, type } = req.query;
@@ -194,8 +204,7 @@ app.get("/api/download", async (req, res) => {
 			return res.status(400).send("URL không hợp lệ");
 		}
 
-		// Bước 1: Lấy Info bằng chiến thuật tốt nhất
-		// Chúng ta gọi lại getInfoWithRetry để đảm bảo lấy được info sạch trước khi tải
+		// Bước 1: Lấy Info "sạch" bằng chiến thuật
 		const { info } = await getInfoWithRetry(url);
 
 		const title = info.videoDetails.title.replace(
@@ -220,7 +229,7 @@ app.get("/api/download", async (req, res) => {
 			contentType = "video/mp4";
 			filename = `${title}_HighRes_NoAudio.mp4`;
 		} else {
-			// Lọc video có cả tiếng và hình (thường max 720p)
+			// Video có tiếng (720p)
 			format = ytdl.chooseFormat(info.formats, {
 				quality: "highest",
 				filter: "audioandvideo",
@@ -244,11 +253,10 @@ app.get("/api/download", async (req, res) => {
 		);
 		res.header("Content-Type", contentType);
 
-		// Bước 2: Tải xuống TỪ INFO ĐÃ LẤY ĐƯỢC (downloadFromInfo)
-		// Đây là điểm mấu chốt: Không dùng ytdl(url) vì nó sẽ tự fetch info lại bằng default agent và bị chặn.
+		// Bước 2: Tải xuống bằng chính object info vừa lấy được (Tránh bị chặn khi fetch lại)
 		const videoStream = ytdl.downloadFromInfo(info, {
 			format: format,
-			highWaterMark: 1 << 22, // 4MB Buffer
+			highWaterMark: 1 << 22,
 		});
 
 		videoStream.pipe(res);
