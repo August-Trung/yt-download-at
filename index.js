@@ -1,6 +1,6 @@
 const express = require("express");
 const cors = require("cors");
-const ytDlp = require("yt-dlp-exec");
+const ytDlp = require("youtube-dl-exec");
 const ytpl = require("ytpl");
 const app = express();
 const fs = require("fs");
@@ -12,12 +12,13 @@ app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
 app.use(express.json());
 
 // --- XỬ LÝ COOKIES (NẾU CÓ) ---
-// yt-dlp lách luật rất tốt, thường không cần cookies vẫn tải được.
-// Tuy nhiên nếu bạn muốn dùng Cookies, hãy paste nội dung file cookies.txt vào biến môi trường YOUTUBE_COOKIES_TXT
 const COOKIES_FILE_PATH = path.join(__dirname, "cookies.txt");
 
 // Helper function để ghi cookies ra file nếu có biến môi trường
 const setupCookies = () => {
+	// Nếu có biến môi trường dạng JSON (Render), ta ưu tiên dùng
+	// Nhưng yt-dlp cần Netscape format.
+	// Tạm thời chỉ log, nếu người dùng setup file cookies.txt thông qua biến ENV thì ghi ra.
 	if (process.env.YOUTUBE_COOKIES_TXT) {
 		fs.writeFileSync(COOKIES_FILE_PATH, process.env.YOUTUBE_COOKIES_TXT);
 		console.log("--> [INFO] Đã tạo file cookies.txt từ biến môi trường.");
@@ -41,12 +42,10 @@ app.get("/api/info", async (req, res) => {
 			noCallHome: true,
 			preferFreeFormats: true,
 			youtubeSkipDashManifest: true,
-			// Giả lập User Agent của Chrome Windows để giống người dùng thật
 			userAgent:
 				"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
 		};
 
-		// Nếu có file cookies thì dùng
 		if (hasCookies || fs.existsSync(COOKIES_FILE_PATH)) {
 			flags.cookies = COOKIES_FILE_PATH;
 		}
@@ -55,8 +54,6 @@ app.get("/api/info", async (req, res) => {
 
 		// Xử lý Script/Description
 		let scriptContent = "";
-		// yt-dlp trả về subtitles trong object requested_subtitles hoặc automatic_captions
-		// Tuy nhiên để đơn giản, ta lấy description làm script fallback
 		if (output.description) {
 			scriptContent = output.description;
 		}
@@ -79,7 +76,6 @@ app.get("/api/info", async (req, res) => {
 		res.json(metadata);
 	} catch (error) {
 		console.error("yt-dlp Info Error:", error.message);
-		// Trả về lỗi thân thiện hơn
 		res.status(500).json({
 			error: "Không thể lấy thông tin video. Server quá tải hoặc YouTube chặn IP.",
 		});
@@ -92,7 +88,6 @@ app.get("/api/playlist", async (req, res) => {
 		const { url } = req.query;
 		if (!url) return res.status(400).json({ error: "Thiếu URL" });
 
-		// Dùng ytpl cho nhanh, yt-dlp lấy playlist rất lâu (cold start)
 		const playlistID = await ytpl.getPlaylistID(url);
 		const playlist = await ytpl(playlistID, { limit: 20 });
 		const videos = playlist.items.map((item) => ({
@@ -124,26 +119,17 @@ app.get("/api/download", async (req, res) => {
 		let format = "best";
 		let contentType = "video/mp4";
 
-		// Cấu hình format string cho yt-dlp
 		if (type === "audio") {
-			// bestaudio thường là webm/m4a. yt-dlp có thể transcode on-the-fly nếu có ffmpeg,
-			// nhưng trên Render thường không có ffmpeg sẵn hoặc tốn CPU.
-			// Ta lấy bestaudio, client sẽ nhận về file nghe được (thường là m4a/opus).
-			// Đặt tên file là mp3 để "lừa" một số player, hoặc để m4a cho chuẩn.
 			format = "bestaudio/best";
 			contentType = "audio/mpeg";
 		} else if (type === "video_silent") {
-			format = "bestvideo"; // Video only (high res)
+			format = "bestvideo";
 			contentType = "video/mp4";
 		} else {
-			// Video có tiếng. yt-dlp mặc định 'best' sẽ cố merge video+audio.
-			// Nếu không có ffmpeg, nó sẽ fallback về best compatible (720p).
 			format = "best[height<=720]";
 			contentType = "video/mp4";
 		}
 
-		// Lấy title nhanh để đặt tên file (Dùng --get-filename giả lập)
-		// Hoặc đơn giản là lấy info json nhẹ
 		const info = await ytDlp(url, {
 			dumpSingleJson: true,
 			noWarnings: true,
@@ -162,31 +148,27 @@ app.get("/api/download", async (req, res) => {
 		);
 		res.header("Content-Type", contentType);
 
-		// Chuẩn bị arguments cho yt-dlp exec
 		const args = {
-			output: "-", // Pipe ra stdout
+			output: "-",
 			format: format,
 			noPart: true,
 			noCallHome: true,
 			noCheckCertificates: true,
-			quiet: true, // Tắt log rác vào stdout làm hỏng file
+			quiet: true,
 		};
 
 		if (hasCookies || fs.existsSync(COOKIES_FILE_PATH)) {
 			args.cookies = COOKIES_FILE_PATH;
 		}
 
-		// Chạy yt-dlp và pipe thẳng output vào response
 		const subprocess = ytDlp.exec(url, args);
 
 		subprocess.stdout.pipe(res);
 
-		// Xử lý lỗi từ stderr của yt-dlp nếu có (để debug trên server logs)
 		subprocess.stderr.on("data", (data) => {
 			console.error(`[yt-dlp stderr]: ${data}`);
 		});
 
-		// Hủy khi client ngắt kết nối
 		req.on("close", () => {
 			subprocess.kill();
 		});
@@ -196,7 +178,6 @@ app.get("/api/download", async (req, res) => {
 	}
 });
 
-// Health check root
 app.get("/", (req, res) => {
 	res.send("Server yt-dlp Downloader is running!");
 });
