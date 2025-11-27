@@ -47,52 +47,49 @@ if (process.env.YOUTUBE_COOKIES) {
 // --- 2. CHIẾN THUẬT (STRATEGIES) ---
 const getStrategies = () => {
 	const strategies = [];
+	const hasCookies = fs.existsSync(COOKIES_FILE_PATH);
 
-	// Strategy 1: Cookies (Nếu có)
-	if (fs.existsSync(COOKIES_FILE_PATH)) {
+	// Base args common for all
+	const baseArgs = [
+		"--no-warnings",
+		"--no-check-certificates",
+		"--prefer-free-formats",
+		"--dump-single-json",
+	];
+
+	// Helper to add strategy
+	const addStrat = (name, client, useCookies) => {
+		const args = [...baseArgs];
+
+		// Client spoofing
+		if (client) {
+			args.push("--extractor-args", `youtube:player_client=${client}`);
+		}
+
+		// Cookies
+		if (useCookies && hasCookies) {
+			args.push("--cookies", COOKIES_FILE_PATH);
+		}
+
 		strategies.push({
-			name: "Cookies + Desktop",
-			args: [
-				"--cookies",
-				COOKIES_FILE_PATH,
-				"--user-agent",
-				"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-			],
+			name: `${name} ${useCookies ? "(With Cookies)" : "(No Cookies)"}`,
+			args,
 		});
+	};
+
+	// --- ƯU TIÊN 1: COOKIES + MOBILE (Mạnh nhất để lách Geo-lock) ---
+	if (hasCookies) {
+		addStrat("Android", "android", true);
+		addStrat("iOS", "ios", true);
+		addStrat("Web Creator", "web_creator", true);
 	}
 
-	// Strategy 2: Android (No Cookies - Bypass Geo-lock)
-	strategies.push({
-		name: "Android Client",
-		args: [
-			"--extractor-args",
-			"youtube:player_client=android",
-			"--user-agent",
-			"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-		],
-	});
+	// --- ƯU TIÊN 2: MOBILE (NO COOKIES - Nếu cookies bị lỗi/hết hạn) ---
+	addStrat("Android", "android", false);
+	addStrat("iOS", "ios", false);
 
-	// Strategy 3: iOS (No Cookies)
-	strategies.push({
-		name: "iOS Client",
-		args: [
-			"--extractor-args",
-			"youtube:player_client=ios",
-			"--user-agent",
-			"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-		],
-	});
-
-	// Strategy 4: TV Embedded (No Cookies - Ultimate Fallback)
-	strategies.push({
-		name: "TV Embedded",
-		args: [
-			"--extractor-args",
-			"youtube:player_client=tv_embedded",
-			"--user-agent",
-			"Mozilla/5.0 (SMART-TV; LINUX; Tizen 5.0) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/2.2 Chrome/63.0.3239.84 TV Safari/537.36",
-		],
-	});
+	// --- ƯU TIÊN 3: TV EMBEDDED (Thường không cần login) ---
+	addStrat("TV Embedded", "tv_embedded", false);
 
 	return strategies;
 };
@@ -100,13 +97,10 @@ const getStrategies = () => {
 // --- HELPER: RUN YT-DLP ---
 const runYtDlp = (args) => {
 	return new Promise((resolve, reject) => {
-		const process = spawn(YTDLP_PATH, [
-			...args,
-			"--no-warnings",
-			"--no-check-certificates",
-			"--prefer-free-formats",
-			"--dump-single-json",
-		]);
+		// Log command for debug (hide cookies path)
+		// console.log("Running:", args.filter(a => !a.includes('cookies')).join(' '));
+
+		const process = spawn(YTDLP_PATH, args);
 
 		let stdout = "";
 		let stderr = "";
@@ -137,7 +131,7 @@ app.get("/api/info", async (req, res) => {
 	let lastError = null;
 
 	for (const strategy of strategies) {
-		console.log(`    Trying strategy: ${strategy.name}...`);
+		console.log(`    Trying: ${strategy.name}...`);
 		try {
 			const output = await runYtDlp([url, ...strategy.args]);
 
@@ -157,21 +151,18 @@ app.get("/api/info", async (req, res) => {
 				script: output.description || "Không có mô tả.",
 			};
 
-			console.log(`    [SUCCESS] Strategy ${strategy.name} worked!`);
+			console.log(`    [SUCCESS] ${strategy.name} worked!`);
 			return res.json(metadata);
 		} catch (error) {
-			console.log(
-				`    [FAIL] ${strategy.name}: ${error.message.split("\n")[0]}`
-			);
+			// console.log(`    [FAIL] Msg: ${error.message.substring(0, 100)}...`);
 			lastError = error.message;
-			// Continue to next strategy
 		}
 	}
 
 	console.error("--> ALL STRATEGIES FAILED.");
 	if (lastError && lastError.includes("Sign in")) {
 		return res.status(403).json({
-			error: "Tất cả chiến thuật thất bại (Geo-lock). Hãy thử lại sau.",
+			error: "Server bị YouTube chặn (403). Hãy thử cập nhật Cookies mới.",
 		});
 	}
 	res.status(500).json({ error: "Không thể lấy thông tin video." });
@@ -184,19 +175,21 @@ app.get("/api/download", async (req, res) => {
 
 	console.log(`--> [Download] ${url} [${type}]`);
 
-	// Mặc định dùng Android Client cho Download để ổn định nhất (kể cả khi không có cookies)
+	// Download Strategy: Use Android + Cookies (Best chance)
 	const downloadArgs = [
 		url,
 		"-o",
 		"-",
 		"--extractor-args",
 		"youtube:player_client=android",
-		"--user-agent",
-		"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
 		"--no-part",
 		"--no-check-certificates",
 		"--quiet",
 	];
+
+	if (fs.existsSync(COOKIES_FILE_PATH)) {
+		downloadArgs.push("--cookies", COOKIES_FILE_PATH);
+	}
 
 	// Định dạng
 	if (type === "audio") {
@@ -210,7 +203,6 @@ app.get("/api/download", async (req, res) => {
 		res.header("Content-Type", "video/mp4");
 	}
 
-	// Set Header
 	res.header(
 		"Content-Disposition",
 		`attachment; filename="video_download.${
@@ -220,6 +212,11 @@ app.get("/api/download", async (req, res) => {
 
 	const subprocess = spawn(YTDLP_PATH, downloadArgs);
 	subprocess.stdout.pipe(res);
+
+	// Log error but don't crash
+	subprocess.stderr.on("data", (d) =>
+		console.error(`DL Error: ${d.toString()}`)
+	);
 
 	req.on("close", () => subprocess.kill());
 });
@@ -247,8 +244,6 @@ app.get("/api/playlist", async (req, res) => {
 	}
 });
 
-app.get("/", (req, res) =>
-	res.send("Server yt-dlp Multi-Strategy is running!")
-);
+app.get("/", (req, res) => res.send("Server yt-dlp Auto-Strategy is running!"));
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
