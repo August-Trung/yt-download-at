@@ -11,10 +11,8 @@ app.use(express.json());
 // --- DANH SÁCH SERVER COBALT (Cân bằng tải & Dự phòng) ---
 // Nếu server này chết, tự động nhảy sang server khác
 const COBALT_INSTANCES = [
-	"https://api.cobalt.tools",
-	"https://co.wuk.sh",
-	"https://cobalt.kwiatekmiki.pl",
-	"https://cobalt.tools",
+	"https://api.cobalt.tools", // Instance chính
+	"https://cobalt-api.kwiatekmiki.com", // Mirror
 ];
 
 // Helper: Gọi API Cobalt với cơ chế Retry
