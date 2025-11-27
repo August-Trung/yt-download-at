@@ -28,11 +28,11 @@ const fetchFromCobalt = async (url, config = {}) => {
 
 			// Cấu trúc request theo Cobalt API v9/v10 chính thức
 			const requestBody = {
-				url: url,
-				videoQuality: config.videoQuality || "1080", // "144" | "240" | "360" | "480" | "720" | "1080" | "1440" | "2160" | "4320" | "max"
-				audioFormat: config.audioFormat || "mp3", // "best" | "mp3" | "ogg" | "wav" | "opus"
-				filenameStyle: "classic", // "classic" | "basic" | "pretty" | "nerdy"
-				isAudioOnly: config.isAudioOnly || false,
+				url: "https://youtu.be/Lj0amw3InZI?si=SkwrSYnvaIiqp1zg",
+				vQuality: "1080",
+				isAudioOnly: false,
+				aFormat: "mp3",
+				filenameStyle: "classic",
 			};
 
 			console.log(
