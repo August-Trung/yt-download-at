@@ -6,17 +6,15 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 // API Key cho Cobalt (Tùy chọn - lấy từ https://cobalt.tools)
-const COBALT_API_KEY = process.env.COBALT_API_KEY || ""; // Để trống nếu dùng instance công khai
+const COBALT_API_KEY = process.env.COBALT_API_KEY || "";
 
 app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
 app.use(express.json());
 
-// --- DANH SÁCH SERVER COBALT (Đã cập nhật 2024) ---
-// API công khai không cần token
+// --- DANH SÁCH SERVER COBALT ---
 const COBALT_INSTANCES = [
-	"https://co.wuk.sh/api/json",
-	"https://cobalt-api.kwiatekmiki.com/api/json",
-	"https://api.cobalt.tools/api/json", // cái này cần API key
+	"https://co.wuk.sh", // Instance công khai chính (KHÔNG có /api/json)
+	"https://api.cobalt.tools", // Instance chính thức (cần API key)
 ];
 
 // Helper: Gọi API Cobalt với cơ chế Retry
@@ -27,12 +25,13 @@ const fetchFromCobalt = async (url, config = {}) => {
 		try {
 			console.log(`--> [Cobalt] Đang thử server: ${instance}`);
 
+			// Cấu trúc request theo Cobalt API v9/v10 chính thức
 			const requestBody = {
 				url: url,
-				vQuality: config.videoQuality || "1080",
-				aFormat: config.audioFormat || "mp3",
-				isAudioOnly: config.downloadMode === "audio",
-				filenamePattern: "classic",
+				videoQuality: config.videoQuality || "1080", // "144" | "240" | "360" | "480" | "720" | "1080" | "1440" | "2160" | "4320" | "max"
+				audioFormat: config.audioFormat || "mp3", // "best" | "mp3" | "ogg" | "wav" | "opus"
+				filenameStyle: "classic", // "classic" | "basic" | "pretty" | "nerdy"
+				isAudioOnly: config.isAudioOnly || false,
 			};
 
 			console.log(
@@ -40,28 +39,31 @@ const fetchFromCobalt = async (url, config = {}) => {
 				JSON.stringify(requestBody, null, 2)
 			);
 
+			const headers = {
+				Accept: "application/json",
+				"Content-Type": "application/json",
+			};
+
+			// Thêm API key nếu có
+			if (COBALT_API_KEY) {
+				headers.Authorization = `Api-Key ${COBALT_API_KEY}`;
+			}
+
+			// QUAN TRỌNG: Endpoint là "/" không phải "/api/json"
 			const response = await fetch(`${instance}/`, {
 				method: "POST",
-				headers: {
-					Accept: "application/json",
-					"Content-Type": "application/json",
-					"User-Agent": "Mozilla/5.0 (compatible; CobaltProxy/1.0)",
-					...(COBALT_API_KEY && {
-						Authorization: `Api-Key ${COBALT_API_KEY}`,
-					}),
-				},
+				headers: headers,
 				body: JSON.stringify(requestBody),
 			});
 
 			console.log(`    [Response Status]: ${response.status}`);
 
-			// Nếu server trả về lỗi
 			if (!response.ok) {
 				const errorText = await response.text();
 				console.warn(
 					`   [Skip] ${instance} HTTP ${
 						response.status
-					}: ${errorText.substring(0, 200)}`
+					}: ${errorText.substring(0, 300)}`
 				);
 				lastError = `HTTP ${response.status}`;
 				continue;
@@ -70,30 +72,30 @@ const fetchFromCobalt = async (url, config = {}) => {
 			const data = await response.json();
 			console.log(`    [Response Data]:`, JSON.stringify(data, null, 2));
 
-			// Kiểm tra lỗi từ Cobalt API
+			// Xử lý các loại response
 			if (data.status === "error" || data.status === "rate-limit") {
 				console.warn(
-					`   [Skip] ${instance} báo lỗi: ${data.text || data.error}`
+					`   [Skip] ${instance} lỗi: ${data.text || "Unknown"}`
 				);
-				lastError = data.text || data.error || "Unknown error";
+				lastError = data.text || "Unknown error";
 				continue;
 			}
 
-			// Thành công
+			// Success cases
 			if (
-				data.status === "tunnel" ||
 				data.status === "redirect" ||
-				data.url
+				data.status === "stream" ||
+				data.status === "success"
 			) {
 				return data;
 			}
 
-			// Nếu có picker (nhiều lựa chọn)
-			if (data.picker && data.picker.length > 0) {
+			// Picker case (nhiều lựa chọn)
+			if (data.status === "picker") {
 				return data;
 			}
 
-			throw new Error("Response không hợp lệ từ Cobalt");
+			throw new Error(`Unexpected response status: ${data.status}`);
 		} catch (e) {
 			console.warn(`   [Skip] ${instance} không phản hồi: ${e.message}`);
 			lastError = e.message;
@@ -113,20 +115,20 @@ app.get("/api/info", async (req, res) => {
 	console.log(`\n[INFO REQUEST] URL: ${url}`);
 
 	try {
-		// Gọi Cobalt để lấy info
+		// Gọi Cobalt để kiểm tra video
 		const result = await fetchFromCobalt(url, {
 			videoQuality: "1080",
-			downloadMode: "auto",
+			isAudioOnly: false,
 		});
 
-		// Lấy ID video từ URL
+		// Lấy video ID từ URL YouTube
 		let videoId = "unknown";
 		let thumbnailUrl = "https://i.ytimg.com/vi/mqdefault.jpg";
 
 		const regExp =
 			/^.*((youtu.be\/)|(v\/)|(\/u\/\w\/)|(embed\/)|(watch\?))\??v?=?([^#&?]*).*/;
 		const match = url.match(regExp);
-		if (match && match[7].length === 11) {
+		if (match && match[7] && match[7].length === 11) {
 			videoId = match[7];
 			thumbnailUrl = `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
 		}
@@ -146,7 +148,7 @@ app.get("/api/info", async (req, res) => {
 	} catch (error) {
 		console.error("[INFO ERROR]:", error.message);
 		res.status(500).json({
-			error: "Không thể lấy thông tin video. Vui lòng kiểm tra lại link.",
+			error: "Không thể lấy thông tin video.",
 			details: error.message,
 		});
 	}
@@ -162,49 +164,59 @@ app.get("/api/download", async (req, res) => {
 	try {
 		let cobaltConfig = {};
 
-		// Cấu hình dựa trên loại tải xuống
+		// Cấu hình theo loại download
 		if (type === "audio") {
 			cobaltConfig = {
 				audioFormat: "mp3",
-				downloadMode: "audio",
+				isAudioOnly: true,
 			};
 		} else if (type === "video_silent") {
-			// Video 4K không tiếng
 			cobaltConfig = {
 				videoQuality: "max",
-				downloadMode: "auto",
+				isAudioOnly: false,
 			};
 		} else {
 			// Video Full HD mặc định
 			cobaltConfig = {
 				videoQuality: "1080",
-				downloadMode: "auto",
+				isAudioOnly: false,
 			};
 		}
 
 		const result = await fetchFromCobalt(url, cobaltConfig);
 
-		// Xử lý các loại response từ Cobalt
-		if (result.url) {
-			// Link trực tiếp
-			console.log(`[DOWNLOAD SUCCESS] Redirecting to: ${result.url}`);
+		console.log(`[DOWNLOAD RESULT]:`, result.status);
+
+		// Xử lý response theo status
+		if (result.status === "redirect" && result.url) {
+			console.log(`[REDIRECT] → ${result.url}`);
 			return res.redirect(result.url);
-		} else if (result.picker && result.picker.length > 0) {
-			// Nhiều lựa chọn, lấy cái đầu tiên
+		}
+
+		if (result.status === "stream" && result.url) {
+			console.log(`[STREAM] → ${result.url}`);
+			return res.redirect(result.url);
+		}
+
+		if (
+			result.status === "picker" &&
+			result.picker &&
+			result.picker.length > 0
+		) {
 			console.log(
-				`[DOWNLOAD SUCCESS] Using picker[0]: ${result.picker[0].url}`
+				`[PICKER] Using first option → ${result.picker[0].url}`
 			);
 			return res.redirect(result.picker[0].url);
-		} else {
-			throw new Error("Không tìm thấy link tải xuống");
 		}
+
+		throw new Error("Không tìm thấy link download");
 	} catch (error) {
 		console.error("[DOWNLOAD ERROR]:", error.message);
 		res.status(500).send(`Lỗi tải xuống: ${error.message}`);
 	}
 });
 
-// --- API PLAYLIST (Chưa hỗ trợ) ---
+// --- API PLAYLIST ---
 app.get("/api/playlist", (req, res) => {
 	console.log("\n[PLAYLIST REQUEST] - Not supported");
 	res.status(501).json({
@@ -224,15 +236,25 @@ app.get("/", (req, res) => {
 				"/api/download?url=VIDEO_URL&type=video|audio|video_silent",
 			playlist: "/api/playlist (not supported)",
 		},
-		version: "2.0",
+		cobaltInstances: COBALT_INSTANCES,
+		hasApiKey: !!COBALT_API_KEY,
+		version: "2.1",
 	});
 });
 
 // --- Khởi động server ---
 app.listen(PORT, () => {
-	console.log("=".repeat(50));
-	console.log(`🚀 Cobalt Proxy Backend đang chạy!`);
+	console.log("=".repeat(60));
+	console.log(`🚀 Cobalt Proxy Backend v2.1`);
 	console.log(`📍 Port: ${PORT}`);
 	console.log(`🔗 API: http://localhost:${PORT}`);
-	console.log("=".repeat(50));
+	console.log(
+		`🔑 API Key: ${
+			COBALT_API_KEY
+				? "✅ Configured"
+				: "❌ Not set (using public instances)"
+		}`
+	);
+	console.log(`🌐 Instances: ${COBALT_INSTANCES.join(", ")}`);
+	console.log("=".repeat(60));
 });
