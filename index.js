@@ -5,12 +5,18 @@ const app = express();
 
 const PORT = process.env.PORT || 4000;
 
+// API Key cho Cobalt (Tùy chọn - lấy từ https://cobalt.tools)
+const COBALT_API_KEY = process.env.COBALT_API_KEY || ""; // Để trống nếu dùng instance công khai
+
 app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
 app.use(express.json());
 
 // --- DANH SÁCH SERVER COBALT (Đã cập nhật 2024) ---
+// API công khai không cần token
 const COBALT_INSTANCES = [
-	"https://api.cobalt.tools", // Instance chính thức
+	"https://co.wuk.sh/api/json",
+	"https://cobalt-api.kwiatekmiki.com/api/json",
+	"https://api.cobalt.tools/api/json", // cái này cần API key
 ];
 
 // Helper: Gọi API Cobalt với cơ chế Retry
@@ -23,10 +29,10 @@ const fetchFromCobalt = async (url, config = {}) => {
 
 			const requestBody = {
 				url: url,
-				videoQuality: config.videoQuality || "1080",
-				audioFormat: config.audioFormat || "mp3",
-				filenameStyle: "basic",
-				downloadMode: config.downloadMode || "auto",
+				vQuality: config.videoQuality || "1080",
+				aFormat: config.audioFormat || "mp3",
+				isAudioOnly: config.downloadMode === "audio",
+				filenamePattern: "classic",
 			};
 
 			console.log(
@@ -40,6 +46,9 @@ const fetchFromCobalt = async (url, config = {}) => {
 					Accept: "application/json",
 					"Content-Type": "application/json",
 					"User-Agent": "Mozilla/5.0 (compatible; CobaltProxy/1.0)",
+					...(COBALT_API_KEY && {
+						Authorization: `Api-Key ${COBALT_API_KEY}`,
+					}),
 				},
 				body: JSON.stringify(requestBody),
 			});
