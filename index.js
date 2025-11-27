@@ -17,25 +17,21 @@ app.use(
 
 app.use(express.json());
 
-// --- CẤU HÌNH AGENT & CHIẾN THUẬT CLIENT ---
-// Render IP bị YouTube chặn rất gắt. Chúng ta dùng 2 lớp bảo vệ:
-// 1. Cookies (Nếu người dùng cung cấp qua biến môi trường)
-// 2. Client giả lập là ANDROID (YouTube nhẹ tay hơn với Mobile)
-
+// --- CẤU HÌNH AGENT ---
 let agent;
 try {
 	const cookiesEnv = process.env.YOUTUBE_COOKIES;
 	if (cookiesEnv) {
 		const cookies = JSON.parse(cookiesEnv);
-		agent = ytdl.createAgent(cookies);
-		console.log(
-			"--> [INFO] Đã load Cookies từ biến môi trường thành công!"
-		);
+		// Tạo agent với cấu hình giữ kết nối để giả lập hành vi người dùng thật
+		agent = ytdl.createAgent(cookies, {
+			keepAlive: true,
+			keepAliveMsecs: 500,
+		});
+		console.log(`--> [INFO] Đã load ${cookies.length} Cookies thành công!`);
 	} else {
 		agent = ytdl.createAgent();
-		console.log(
-			"--> [WARN] Không tìm thấy YOUTUBE_COOKIES. Sẽ dùng chế độ Android Client để lách."
-		);
+		console.log("--> [WARN] Không tìm thấy YOUTUBE_COOKIES.");
 	}
 } catch (error) {
 	console.error("Lỗi parse Cookies:", error.message);
@@ -50,7 +46,7 @@ const formatTime = (seconds) => {
 
 // Health Check
 app.get("/", (req, res) => {
-	res.send("Server YT Downloader is running normally!");
+	res.send("Server YT Downloader (Mobile Strategy) is running!");
 });
 
 // API Info
@@ -61,11 +57,13 @@ app.get("/api/info", async (req, res) => {
 			return res.status(400).json({ error: "URL không hợp lệ" });
 		}
 
-		// CHIẾN THUẬT QUAN TRỌNG:
-		// Sử dụng 'ANDROID' client thường ít bị chặn IP DataCenter hơn là 'WEB'.
+		console.log(`--> Đang lấy info cho: ${url}`);
+
+		// CHIẾN THUẬT MOBILE:
+		// Chỉ dùng 'IOS' và 'ANDROID'. Tuyệt đối KHÔNG dùng 'WEB' vì IP Render dễ bị chặn.
 		const info = await ytdl.getInfo(url, {
 			agent,
-			playerClients: ["ANDROID", "WEB_CREATOR", "WEB"],
+			playerClients: ["IOS", "ANDROID"],
 		});
 
 		const thumbnails = info.videoDetails.thumbnails;
@@ -125,19 +123,11 @@ app.get("/api/info", async (req, res) => {
 	} catch (error) {
 		console.error("Error fetching info:", error.message);
 
-		// Phân loại lỗi để Frontend hiển thị rõ hơn
-		if (error.message.includes("Sign in")) {
+		// Trả về lỗi chi tiết để debug
+		if (error.message.includes("Sign in") || error.status === 403) {
 			return res.status(403).json({
-				error: "Server bị YouTube chặn (403). Cần cập nhật Cookies.",
+				error: "YouTube chặn IP Server (Geo-lock). Hãy thử lại sau hoặc đổi Cookies.",
 			});
-		}
-		if (
-			error.message.includes("No video id found") ||
-			error.message.includes("playable formats")
-		) {
-			return res
-				.status(404)
-				.json({ error: "Video không tồn tại hoặc Server bị chặn IP." });
 		}
 
 		res.status(500).json({ error: "Lỗi Server: " + error.message });
@@ -166,9 +156,7 @@ app.get("/api/playlist", async (req, res) => {
 		res.json(videos);
 	} catch (error) {
 		console.error("Playlist Error:", error.message);
-		res.status(500).json({
-			error: "Không thể lấy playlist. Link Mix (RD) không được hỗ trợ.",
-		});
+		res.status(500).json({ error: "Không thể lấy playlist." });
 	}
 });
 
@@ -181,10 +169,10 @@ app.get("/api/download", async (req, res) => {
 			return res.status(400).send("URL không hợp lệ");
 		}
 
-		// Tương tự info, dùng ANDROID client để tải
+		// Dùng IOS Client cho việc tải xuống
 		const info = await ytdl.getInfo(url, {
 			agent,
-			playerClients: ["ANDROID", "WEB"],
+			playerClients: ["IOS", "ANDROID"],
 		});
 
 		const title = info.videoDetails.title.replace(
@@ -209,15 +197,23 @@ app.get("/api/download", async (req, res) => {
 			contentType = "video/mp4";
 			filename = `${title}_HighRes_NoAudio.mp4`;
 		} else {
-			format = ytdl.chooseFormat(info.formats, { quality: "highest" });
+			// Với IOS Client, đôi khi 'highest' trả về định dạng m3u8 (livestream).
+			// Ta cần lọc định dạng có container là mp4.
+			format = ytdl.chooseFormat(info.formats, {
+				quality: "highest",
+				filter: "audioandvideo",
+			});
+			if (!format)
+				format = ytdl.chooseFormat(info.formats, {
+					quality: "highest",
+				});
+
 			contentType = "video/mp4";
 			filename = `${title}.mp4`;
 		}
 
 		if (!format) {
-			throw new Error(
-				"Không tìm thấy định dạng phù hợp (No playable format found)"
-			);
+			throw new Error("Không tìm thấy định dạng phù hợp.");
 		}
 
 		const encodedFilename = encodeURIComponent(filename);
@@ -231,19 +227,18 @@ app.get("/api/download", async (req, res) => {
 			format: format,
 			highWaterMark: 1 << 22,
 			agent: agent,
-			playerClients: ["ANDROID", "WEB"], // Quan trọng
+			playerClients: ["IOS", "ANDROID"],
 		});
 
 		videoStream.pipe(res);
 
-		// Handle client disconnect
 		req.on("close", () => {
 			videoStream.destroy();
 		});
 	} catch (error) {
 		console.error("Download Error:", error.message);
 		if (!res.headersSent) {
-			res.status(500).send("Lỗi Server: " + error.message);
+			res.status(500).send("Lỗi: " + error.message);
 		}
 	}
 });
