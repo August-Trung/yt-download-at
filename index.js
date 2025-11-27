@@ -8,11 +8,9 @@ const PORT = process.env.PORT || 4000;
 app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
 app.use(express.json());
 
-// --- DANH SÁCH SERVER COBALT (Cân bằng tải & Dự phòng) ---
-// Nếu server này chết, tự động nhảy sang server khác
+// --- DANH SÁCH SERVER COBALT (Đã cập nhật 2024) ---
 const COBALT_INSTANCES = [
-	"https://api.cobalt.tools", // Instance chính
-	"https://cobalt-api.kwiatekmiki.com", // Mirror
+	"https://api.cobalt.tools", // Instance chính thức
 ];
 
 // Helper: Gọi API Cobalt với cơ chế Retry
@@ -23,35 +21,76 @@ const fetchFromCobalt = async (url, config = {}) => {
 		try {
 			console.log(`--> [Cobalt] Đang thử server: ${instance}`);
 
-			const response = await fetch(`${instance}/api/json`, {
+			const requestBody = {
+				url: url,
+				videoQuality: config.videoQuality || "1080",
+				audioFormat: config.audioFormat || "mp3",
+				filenameStyle: "basic",
+				downloadMode: config.downloadMode || "auto",
+			};
+
+			console.log(
+				`    [Request Body]:`,
+				JSON.stringify(requestBody, null, 2)
+			);
+
+			const response = await fetch(`${instance}/`, {
 				method: "POST",
 				headers: {
 					Accept: "application/json",
 					"Content-Type": "application/json",
+					"User-Agent": "Mozilla/5.0 (compatible; CobaltProxy/1.0)",
 				},
-				body: JSON.stringify({
-					url: url,
-					filenamePattern: "basic",
-					...config,
-				}),
+				body: JSON.stringify(requestBody),
 			});
 
-			// Nếu server chết hoặc trả về HTML lỗi
-			if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
+			console.log(`    [Response Status]: ${response.status}`);
 
-			const data = await response.json();
-
-			if (data.status === "error" || data.status === "rate-limit") {
-				console.warn(`   [Skip] ${instance} báo lỗi: ${data.text}`);
-				lastError = data.text;
-				continue; // Thử server tiếp theo
+			// Nếu server trả về lỗi
+			if (!response.ok) {
+				const errorText = await response.text();
+				console.warn(
+					`   [Skip] ${instance} HTTP ${
+						response.status
+					}: ${errorText.substring(0, 200)}`
+				);
+				lastError = `HTTP ${response.status}`;
+				continue;
 			}
 
-			return data; // Thành công
+			const data = await response.json();
+			console.log(`    [Response Data]:`, JSON.stringify(data, null, 2));
+
+			// Kiểm tra lỗi từ Cobalt API
+			if (data.status === "error" || data.status === "rate-limit") {
+				console.warn(
+					`   [Skip] ${instance} báo lỗi: ${data.text || data.error}`
+				);
+				lastError = data.text || data.error || "Unknown error";
+				continue;
+			}
+
+			// Thành công
+			if (
+				data.status === "tunnel" ||
+				data.status === "redirect" ||
+				data.url
+			) {
+				return data;
+			}
+
+			// Nếu có picker (nhiều lựa chọn)
+			if (data.picker && data.picker.length > 0) {
+				return data;
+			}
+
+			throw new Error("Response không hợp lệ từ Cobalt");
 		} catch (e) {
 			console.warn(`   [Skip] ${instance} không phản hồi: ${e.message}`);
+			lastError = e.message;
 		}
 	}
+
 	throw new Error(
 		lastError || "Tất cả server Cobalt đều đang bận. Vui lòng thử lại sau."
 	);
@@ -62,16 +101,19 @@ app.get("/api/info", async (req, res) => {
 	const { url } = req.query;
 	if (!url) return res.status(400).json({ error: "Thiếu URL" });
 
-	try {
-		// Gọi Cobalt để lấy info (Mặc định lấy 720p)
-		const result = await fetchFromCobalt(url);
+	console.log(`\n[INFO REQUEST] URL: ${url}`);
 
-		// Map dữ liệu từ Cobalt về định dạng của Frontend
-		// Cobalt không trả về ID hay Channel name, ta phải tự xử lý sơ bộ
+	try {
+		// Gọi Cobalt để lấy info
+		const result = await fetchFromCobalt(url, {
+			videoQuality: "1080",
+			downloadMode: "auto",
+		});
+
+		// Lấy ID video từ URL
 		let videoId = "unknown";
 		let thumbnailUrl = "https://i.ytimg.com/vi/mqdefault.jpg";
 
-		// Regex lấy ID từ URL youtube
 		const regExp =
 			/^.*((youtu.be\/)|(v\/)|(\/u\/\w\/)|(embed\/)|(watch\?))\??v?=?([^#&?]*).*/;
 		const match = url.match(regExp);
@@ -83,18 +125,20 @@ app.get("/api/info", async (req, res) => {
 		const metadata = {
 			id: videoId,
 			title: result.filename || "Video YouTube",
-			channel: "YouTube Channel", // Cobalt không cung cấp tên kênh
-			views: "---", // Cobalt không cung cấp views
-			description: "Video đã sẵn sàng tải xuống (Powered by Cobalt).",
+			channel: "YouTube Channel",
+			views: "---",
+			description: "Video đã sẵn sàng tải xuống (Powered by Cobalt API).",
 			thumbnailUrl: thumbnailUrl,
 			script: "",
 		};
 
+		console.log(`[INFO SUCCESS] Video ID: ${videoId}`);
 		res.json(metadata);
 	} catch (error) {
-		console.error("Info Error:", error.message);
+		console.error("[INFO ERROR]:", error.message);
 		res.status(500).json({
-			error: "Không thể lấy thông tin. Server quá tải hoặc link lỗi.",
+			error: "Không thể lấy thông tin video. Vui lòng kiểm tra lại link.",
+			details: error.message,
 		});
 	}
 });
@@ -104,63 +148,82 @@ app.get("/api/download", async (req, res) => {
 	const { url, type } = req.query;
 	if (!url) return res.status(400).send("Thiếu URL");
 
-	console.log(`--> [Download Request] ${url} [${type}]`);
+	console.log(`\n[DOWNLOAD REQUEST] URL: ${url}, Type: ${type}`);
 
 	try {
 		let cobaltConfig = {};
 
-		// Cấu hình dựa trên lựa chọn người dùng
+		// Cấu hình dựa trên loại tải xuống
 		if (type === "audio") {
 			cobaltConfig = {
-				isAudioOnly: true,
-				aFormat: "mp3",
+				audioFormat: "mp3",
+				downloadMode: "audio",
 			};
 		} else if (type === "video_silent") {
-			// Frontend gọi là 'silent' (4K), nhưng Cobalt hỗ trợ 4K CÓ TIẾNG (Muxed)
-			// Nên ta request max quality
+			// Video 4K không tiếng
 			cobaltConfig = {
-				vQuality: "max",
-				isAudioOnly: false,
+				videoQuality: "max",
+				downloadMode: "auto",
 			};
 		} else {
-			// Video thường (Full HD)
+			// Video Full HD mặc định
 			cobaltConfig = {
-				vQuality: "1080",
-				isAudioOnly: false,
+				videoQuality: "1080",
+				downloadMode: "auto",
 			};
 		}
 
 		const result = await fetchFromCobalt(url, cobaltConfig);
 
+		// Xử lý các loại response từ Cobalt
 		if (result.url) {
-			// Cobalt trả về link trực tiếp -> Redirect người dùng tải luôn
-			res.redirect(result.url);
-		} else if (result.picker) {
-			// Nếu có nhiều luồng, lấy cái đầu tiên
-			res.redirect(result.picker[0].url);
+			// Link trực tiếp
+			console.log(`[DOWNLOAD SUCCESS] Redirecting to: ${result.url}`);
+			return res.redirect(result.url);
+		} else if (result.picker && result.picker.length > 0) {
+			// Nhiều lựa chọn, lấy cái đầu tiên
+			console.log(
+				`[DOWNLOAD SUCCESS] Using picker[0]: ${result.picker[0].url}`
+			);
+			return res.redirect(result.picker[0].url);
 		} else {
-			throw new Error("Không tìm thấy link tải.");
+			throw new Error("Không tìm thấy link tải xuống");
 		}
 	} catch (error) {
-		console.error("Download Error:", error.message);
-		res.status(500).send(`Lỗi: ${error.message}`);
+		console.error("[DOWNLOAD ERROR]:", error.message);
+		res.status(500).send(`Lỗi tải xuống: ${error.message}`);
 	}
 });
 
-// --- API PLAYLIST (Stub) ---
+// --- API PLAYLIST (Chưa hỗ trợ) ---
 app.get("/api/playlist", (req, res) => {
-	// Cobalt không hỗ trợ fetch playlist JSON.
-	// Trả về lỗi để Frontend biết mà xử lý (nếu cần) hoặc bỏ qua.
-	res.status(400).json({
-		error: "Server hiện tại chưa hỗ trợ tải cả Playlist.",
+	console.log("\n[PLAYLIST REQUEST] - Not supported");
+	res.status(501).json({
+		error: "Tính năng tải Playlist chưa được hỗ trợ.",
+		message: "Vui lòng tải từng video riêng lẻ.",
 	});
 });
 
-// Health check
+// --- Health Check ---
 app.get("/", (req, res) => {
-	res.send("Cobalt Proxy Backend is Running!");
+	res.json({
+		status: "online",
+		message: "Cobalt Proxy Backend is Running!",
+		endpoints: {
+			info: "/api/info?url=VIDEO_URL",
+			download:
+				"/api/download?url=VIDEO_URL&type=video|audio|video_silent",
+			playlist: "/api/playlist (not supported)",
+		},
+		version: "2.0",
+	});
 });
 
+// --- Khởi động server ---
 app.listen(PORT, () => {
-	console.log(`Server Cobalt Proxy running on port ${PORT}`);
+	console.log("=".repeat(50));
+	console.log(`🚀 Cobalt Proxy Backend đang chạy!`);
+	console.log(`📍 Port: ${PORT}`);
+	console.log(`🔗 API: http://localhost:${PORT}`);
+	console.log("=".repeat(50));
 });
