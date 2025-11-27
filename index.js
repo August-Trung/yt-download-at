@@ -1,6 +1,6 @@
 const express = require("express");
 const cors = require("cors");
-const ytDlp = require("youtube-dl-exec");
+const { spawn } = require("child_process");
 const ytpl = require("ytpl");
 const app = express();
 const fs = require("fs");
@@ -11,17 +11,56 @@ const PORT = process.env.PORT || 4000;
 app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
 app.use(express.json());
 
-// --- XỬ LÝ COOKIES (NẾU CÓ) ---
-const COOKIES_FILE_PATH = path.join(__dirname, "cookies.txt");
+// Đường dẫn đến file binary yt-dlp đã tải về
+const YTDLP_PATH = path.join(__dirname, "yt-dlp");
 
-// Helper function để ghi cookies ra file nếu có biến môi trường
+// Helper: Chạy lệnh yt-dlp và lấy kết quả JSON
+const runYtDlpInfo = (url, flags = []) => {
+	return new Promise((resolve, reject) => {
+		// Mặc định thêm các cờ để output JSON
+		const args = [
+			url,
+			"--dump-single-json",
+			"--no-warnings",
+			"--no-call-home",
+			"--no-check-certificates",
+			"--prefer-free-formats",
+			...flags,
+		];
+
+		const process = spawn(YTDLP_PATH, args);
+
+		let stdout = "";
+		let stderr = "";
+
+		process.stdout.on("data", (data) => {
+			stdout += data.toString();
+		});
+
+		process.stderr.on("data", (data) => {
+			stderr += data.toString();
+		});
+
+		process.on("close", (code) => {
+			if (code === 0) {
+				try {
+					const json = JSON.parse(stdout);
+					resolve(json);
+				} catch (e) {
+					reject(new Error("Failed to parse JSON output"));
+				}
+			} else {
+				reject(new Error(stderr || "yt-dlp exited with error"));
+			}
+		});
+	});
+};
+
+// --- XỬ LÝ COOKIES ---
+const COOKIES_FILE_PATH = path.join(__dirname, "cookies.txt");
 const setupCookies = () => {
-	// Nếu có biến môi trường dạng JSON (Render), ta ưu tiên dùng
-	// Nhưng yt-dlp cần Netscape format.
-	// Tạm thời chỉ log, nếu người dùng setup file cookies.txt thông qua biến ENV thì ghi ra.
 	if (process.env.YOUTUBE_COOKIES_TXT) {
 		fs.writeFileSync(COOKIES_FILE_PATH, process.env.YOUTUBE_COOKIES_TXT);
-		console.log("--> [INFO] Đã tạo file cookies.txt từ biến môi trường.");
 		return true;
 	}
 	return false;
@@ -33,26 +72,16 @@ app.get("/api/info", async (req, res) => {
 	const { url } = req.query;
 	if (!url) return res.status(400).json({ error: "Thiếu URL" });
 
-	console.log(`--> [yt-dlp] Lấy info: ${url}`);
+	console.log(`--> [yt-dlp-native] Lấy info: ${url}`);
 
 	try {
-		const flags = {
-			dumpSingleJson: true,
-			noWarnings: true,
-			noCallHome: true,
-			preferFreeFormats: true,
-			youtubeSkipDashManifest: true,
-			userAgent:
-				"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-		};
-
+		const flags = [];
 		if (hasCookies || fs.existsSync(COOKIES_FILE_PATH)) {
-			flags.cookies = COOKIES_FILE_PATH;
+			flags.push("--cookies", COOKIES_FILE_PATH);
 		}
 
-		const output = await ytDlp(url, flags);
+		const output = await runYtDlpInfo(url, flags);
 
-		// Xử lý Script/Description
 		let scriptContent = "";
 		if (output.description) {
 			scriptContent = output.description;
@@ -101,10 +130,7 @@ app.get("/api/playlist", async (req, res) => {
 		}));
 		res.json(videos);
 	} catch (error) {
-		console.error("Playlist Error:", error.message);
-		res.status(500).json({
-			error: "Lỗi lấy Playlist. Link có thể không công khai.",
-		});
+		res.status(500).json({ error: "Lỗi lấy Playlist." });
 	}
 });
 
@@ -113,7 +139,7 @@ app.get("/api/download", async (req, res) => {
 	const { url, type } = req.query;
 	if (!url) return res.status(400).send("Thiếu URL");
 
-	console.log(`--> [yt-dlp] Tải xuống: ${url} [${type}]`);
+	console.log(`--> [yt-dlp-native] Tải xuống: ${url} [${type}]`);
 
 	try {
 		let format = "best";
@@ -130,15 +156,16 @@ app.get("/api/download", async (req, res) => {
 			contentType = "video/mp4";
 		}
 
-		const info = await ytDlp(url, {
-			dumpSingleJson: true,
-			noWarnings: true,
-			flatPlaylist: true,
-		});
-		const title = (info.title || "video").replace(
-			/[^\w\s\u00C0-\u1EF9]/gi,
-			""
-		);
+		// Lấy tên file trước
+		let title = "video";
+		try {
+			const info = await runYtDlpInfo(url, ["--flat-playlist"]);
+			title = (info.title || "video").replace(
+				/[^\w\s\u00C0-\u1EF9]/gi,
+				""
+			);
+		} catch (e) {}
+
 		const ext = type === "audio" ? "mp3" : "mp4";
 		const filename = `${title}.${ext}`;
 
@@ -148,20 +175,23 @@ app.get("/api/download", async (req, res) => {
 		);
 		res.header("Content-Type", contentType);
 
-		const args = {
-			output: "-",
-			format: format,
-			noPart: true,
-			noCallHome: true,
-			noCheckCertificates: true,
-			quiet: true,
-		};
+		const args = [
+			url,
+			"-o",
+			"-", // Output ra stdout
+			"-f",
+			format,
+			"--no-part",
+			"--no-call-home",
+			"--no-check-certificates",
+			"--quiet",
+		];
 
 		if (hasCookies || fs.existsSync(COOKIES_FILE_PATH)) {
-			args.cookies = COOKIES_FILE_PATH;
+			args.push("--cookies", COOKIES_FILE_PATH);
 		}
 
-		const subprocess = ytDlp.exec(url, args);
+		const subprocess = spawn(YTDLP_PATH, args);
 
 		subprocess.stdout.pipe(res);
 
@@ -179,9 +209,9 @@ app.get("/api/download", async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-	res.send("Server yt-dlp Downloader is running!");
+	res.send("Server yt-dlp Native is running!");
 });
 
 app.listen(PORT, () => {
-	console.log(`Server yt-dlp đang chạy tại port ${PORT}`);
+	console.log(`Server đang chạy tại port ${PORT}`);
 });
