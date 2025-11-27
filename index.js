@@ -23,11 +23,9 @@ try {
 	const cookiesEnv = process.env.YOUTUBE_COOKIES;
 	if (cookiesEnv) {
 		const cookies = JSON.parse(cookiesEnv);
-		// Tạo agent với cấu hình giữ kết nối để giả lập hành vi người dùng thật
-		agent = ytdl.createAgent(cookies, {
-			keepAlive: true,
-			keepAliveMsecs: 500,
-		});
+		// SỬA LỖI: Bỏ options keepAlive gây lỗi "unsupported keepAlive"
+		// Chỉ cần truyền cookies là đủ để xác thực.
+		agent = ytdl.createAgent(cookies);
 		console.log(`--> [INFO] Đã load ${cookies.length} Cookies thành công!`);
 	} else {
 		agent = ytdl.createAgent();
