@@ -44,20 +44,19 @@ if (process.env.YOUTUBE_COOKIES) {
 	if (data) fs.writeFileSync(COOKIES_FILE_PATH, data);
 }
 
-// --- 2. CHIẾN THUẬT (STRATEGIES) ---
+// --- 2. CHIẾN THUẬT VÉT CẠN (BRUTE FORCE STRATEGIES) ---
 const getStrategies = () => {
 	const strategies = [];
 	const hasCookies = fs.existsSync(COOKIES_FILE_PATH);
 
-	// Base args common for all
 	const baseArgs = [
 		"--no-warnings",
 		"--no-check-certificates",
 		"--prefer-free-formats",
 		"--dump-single-json",
+		"--force-ipv4", // Ép dùng IPv4 để ổn định hơn
 	];
 
-	// Helper to add strategy
 	const addStrat = (name, client, useCookies) => {
 		const args = [...baseArgs];
 
@@ -66,30 +65,37 @@ const getStrategies = () => {
 			args.push("--extractor-args", `youtube:player_client=${client}`);
 		}
 
-		// Cookies
+		// Cookies (Luôn dùng nếu có, vì IP Render đã bị đen)
 		if (useCookies && hasCookies) {
 			args.push("--cookies", COOKIES_FILE_PATH);
 		}
 
 		strategies.push({
-			name: `${name} ${useCookies ? "(With Cookies)" : "(No Cookies)"}`,
+			name: `${name} ${useCookies ? "(Cookies)" : "(No Cookies)"}`,
 			args,
 		});
 	};
 
-	// --- ƯU TIÊN 1: COOKIES + MOBILE (Mạnh nhất để lách Geo-lock) ---
+	// --- NHÓM 1: WEB BROWSERS (Thường ít bị chặn nếu có Cookies xịn) ---
 	if (hasCookies) {
-		addStrat("Android", "android", true);
-		addStrat("iOS", "ios", true);
-		addStrat("Web Creator", "web_creator", true);
+		addStrat("1. Web Desktop", "web", true);
+		addStrat("2. Mobile Web", "mweb", true);
 	}
 
-	// --- ƯU TIÊN 2: MOBILE (NO COOKIES - Nếu cookies bị lỗi/hết hạn) ---
-	addStrat("Android", "android", false);
-	addStrat("iOS", "ios", false);
+	// --- NHÓM 2: MOBILE APPS (Fake App để né bot check) ---
+	if (hasCookies) {
+		addStrat("3. Android", "android", true);
+		addStrat("4. iOS", "ios", true);
+	}
 
-	// --- ƯU TIÊN 3: TV EMBEDDED (Thường không cần login) ---
-	addStrat("TV Embedded", "tv_embedded", false);
+	// --- NHÓM 3: NO COOKIES (Dự phòng nếu Cookies lỗi) ---
+	addStrat("5. Android (No Cookies)", "android", false);
+	addStrat("6. iOS (No Cookies)", "ios", false);
+
+	// --- NHÓM 4: OBSCURE CLIENTS (Ít người dùng nên ít bị chặn) ---
+	addStrat("7. TV Embedded", "tv_embedded", false);
+	addStrat("8. Android Creator", "android_creator", hasCookies);
+	addStrat("9. Android Music", "android_music", hasCookies);
 
 	return strategies;
 };
@@ -97,9 +103,6 @@ const getStrategies = () => {
 // --- HELPER: RUN YT-DLP ---
 const runYtDlp = (args) => {
 	return new Promise((resolve, reject) => {
-		// Log command for debug (hide cookies path)
-		// console.log("Running:", args.filter(a => !a.includes('cookies')).join(' '));
-
 		const process = spawn(YTDLP_PATH, args);
 
 		let stdout = "";
@@ -121,6 +124,8 @@ const runYtDlp = (args) => {
 	});
 };
 
+const wait = (ms) => new Promise((res) => setTimeout(res, ms));
+
 // --- API INFO (LOOP STRATEGIES) ---
 app.get("/api/info", async (req, res) => {
 	const { url } = req.query;
@@ -135,7 +140,6 @@ app.get("/api/info", async (req, res) => {
 		try {
 			const output = await runYtDlp([url, ...strategy.args]);
 
-			// Success!
 			const metadata = {
 				id: output.id,
 				title: output.title,
@@ -151,21 +155,24 @@ app.get("/api/info", async (req, res) => {
 				script: output.description || "Không có mô tả.",
 			};
 
-			console.log(`    [SUCCESS] ${strategy.name} worked!`);
+			console.log(`    [SUCCESS] Strategy worked: ${strategy.name}`);
 			return res.json(metadata);
 		} catch (error) {
-			// console.log(`    [FAIL] Msg: ${error.message.substring(0, 100)}...`);
 			lastError = error.message;
+			// Nghỉ 200ms giữa các lần thử để tránh spam
+			await wait(200);
 		}
 	}
 
 	console.error("--> ALL STRATEGIES FAILED.");
 	if (lastError && lastError.includes("Sign in")) {
 		return res.status(403).json({
-			error: "Server bị YouTube chặn (403). Hãy thử cập nhật Cookies mới.",
+			error: "Server bị YouTube chặn (403). Cookies của bạn có thể đã hết hạn hoặc không khớp với IP Server.",
 		});
 	}
-	res.status(500).json({ error: "Không thể lấy thông tin video." });
+	res.status(500).json({
+		error: "Không thể lấy thông tin video. Vui lòng thử lại sau.",
+	});
 });
 
 // --- API DOWNLOAD ---
@@ -175,7 +182,7 @@ app.get("/api/download", async (req, res) => {
 
 	console.log(`--> [Download] ${url} [${type}]`);
 
-	// Download Strategy: Use Android + Cookies (Best chance)
+	// Download Strategy: Thử dùng cấu hình Android + Cookies vì ổn định nhất cho stream
 	const downloadArgs = [
 		url,
 		"-o",
@@ -185,13 +192,13 @@ app.get("/api/download", async (req, res) => {
 		"--no-part",
 		"--no-check-certificates",
 		"--quiet",
+		"--force-ipv4",
 	];
 
 	if (fs.existsSync(COOKIES_FILE_PATH)) {
 		downloadArgs.push("--cookies", COOKIES_FILE_PATH);
 	}
 
-	// Định dạng
 	if (type === "audio") {
 		downloadArgs.push("-f", "bestaudio/best");
 		res.header("Content-Type", "audio/mpeg");
@@ -213,7 +220,6 @@ app.get("/api/download", async (req, res) => {
 	const subprocess = spawn(YTDLP_PATH, downloadArgs);
 	subprocess.stdout.pipe(res);
 
-	// Log error but don't crash
 	subprocess.stderr.on("data", (d) =>
 		console.error(`DL Error: ${d.toString()}`)
 	);
@@ -244,6 +250,8 @@ app.get("/api/playlist", async (req, res) => {
 	}
 });
 
-app.get("/", (req, res) => res.send("Server yt-dlp Auto-Strategy is running!"));
+app.get("/", (req, res) =>
+	res.send("Server yt-dlp Brute-Force Strategy is running!")
+);
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
