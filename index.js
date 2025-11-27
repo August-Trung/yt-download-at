@@ -13,10 +13,10 @@ app.use(express.json());
 
 // --- DANH SÁCH SERVER COBALT ---
 const COBALT_INSTANCES = [
-	"https://co.wuk.sh", // Instance công khai chính (KHÔNG có /api/json)
-	"https://api.cobalt.tools", // Instance chính thức (cần API key)
+	"https://cobalt.kwanecki.com",
+	"https://cobalt-api.kwiatekmiki.com",
+	"https://cobaltbeta.up.railway.app",
 ];
-
 // Helper: Gọi API Cobalt với cơ chế Retry
 const fetchFromCobalt = async (url, config = {}) => {
 	let lastError = null;
