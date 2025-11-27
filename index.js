@@ -7,7 +7,6 @@ const app = express();
 
 const PORT = process.env.PORT || 4000;
 
-// Cấu hình CORS mở rộng
 app.use(
 	cors({
 		origin: "*",
@@ -23,18 +22,54 @@ try {
 	const cookiesEnv = process.env.YOUTUBE_COOKIES;
 	if (cookiesEnv) {
 		const cookies = JSON.parse(cookiesEnv);
-		// SỬA LỖI: Bỏ options keepAlive gây lỗi "unsupported keepAlive"
-		// Chỉ cần truyền cookies là đủ để xác thực.
+		// Quan trọng: Không set keepAlive để tránh lỗi trên Render
 		agent = ytdl.createAgent(cookies);
-		console.log(`--> [INFO] Đã load ${cookies.length} Cookies thành công!`);
+		console.log(`--> [INFO] Đã load Cookies thành công!`);
 	} else {
-		agent = ytdl.createAgent();
-		console.log("--> [WARN] Không tìm thấy YOUTUBE_COOKIES.");
+		console.log(
+			"--> [WARN] Không tìm thấy YOUTUBE_COOKIES. Server sẽ chạy chế độ không đăng nhập."
+		);
 	}
 } catch (error) {
 	console.error("Lỗi parse Cookies:", error.message);
 	agent = ytdl.createAgent();
 }
+
+// --- HÀM TRỢ GIÚP: CHIẾN THUẬT RETRY (QUAN TRỌNG) ---
+// Hàm này sẽ thử lần lượt các cách để lấy thông tin video
+const getInfoWithRetry = async (url) => {
+	const strategies = [
+		{
+			name: "Mobile Strategy (Android/iOS)",
+			options: { agent, playerClients: ["ANDROID", "IOS"] },
+		},
+		{
+			name: "Web Strategy",
+			options: { agent, playerClients: ["WEB", "WEB_CREATOR"] },
+		},
+		{
+			name: "TV Embedded Strategy (No Cookies)",
+			// TV Embedded thường không cần cookies và ít bị Geo-block
+			options: { agent: undefined, playerClients: ["TV_EMBEDDED"] },
+		},
+	];
+
+	let lastError = null;
+
+	for (const strategy of strategies) {
+		try {
+			console.log(`--> Thử chiến thuật: ${strategy.name}...`);
+			const info = await ytdl.getInfo(url, strategy.options);
+			return { info, strategy: strategy.name }; // Thành công trả về ngay
+		} catch (error) {
+			console.log(`   [FAIL] ${strategy.name}: ${error.message}`);
+			lastError = error;
+			// Nếu lỗi là do video không tồn tại thì dừng luôn, không thử cách khác
+			if (error.message.includes("Video unavailable")) break;
+		}
+	}
+	throw lastError || new Error("Mọi chiến thuật đều thất bại.");
+};
 
 const formatTime = (seconds) => {
 	const m = Math.floor(seconds / 60);
@@ -44,7 +79,7 @@ const formatTime = (seconds) => {
 
 // Health Check
 app.get("/", (req, res) => {
-	res.send("Server YT Downloader (Mobile Strategy) is running!");
+	res.send("Server YT Downloader (Multi-Strategy V2) is running!");
 });
 
 // API Info
@@ -55,14 +90,9 @@ app.get("/api/info", async (req, res) => {
 			return res.status(400).json({ error: "URL không hợp lệ" });
 		}
 
-		console.log(`--> Đang lấy info cho: ${url}`);
-
-		// CHIẾN THUẬT MOBILE:
-		// Chỉ dùng 'IOS' và 'ANDROID'. Tuyệt đối KHÔNG dùng 'WEB' vì IP Render dễ bị chặn.
-		const info = await ytdl.getInfo(url, {
-			agent,
-			playerClients: ["IOS", "ANDROID"],
-		});
+		// Gọi hàm Retry thông minh
+		const { info, strategy } = await getInfoWithRetry(url);
+		console.log(`--> Thành công với: ${strategy}`);
 
 		const thumbnails = info.videoDetails.thumbnails;
 		const thumbnail = thumbnails[thumbnails.length - 1].url;
@@ -98,7 +128,7 @@ app.get("/api/info", async (req, res) => {
 				}
 			}
 		} catch (e) {
-			// Ignore caption errors
+			/* Ignore */
 		}
 
 		if (!scriptContent)
@@ -119,16 +149,13 @@ app.get("/api/info", async (req, res) => {
 
 		res.json(metadata);
 	} catch (error) {
-		console.error("Error fetching info:", error.message);
-
-		// Trả về lỗi chi tiết để debug
-		if (error.message.includes("Sign in") || error.status === 403) {
-			return res.status(403).json({
-				error: "YouTube chặn IP Server (Geo-lock). Hãy thử lại sau hoặc đổi Cookies.",
-			});
-		}
-
-		res.status(500).json({ error: "Lỗi Server: " + error.message });
+		console.error("Final Error:", error.message);
+		const status = error.message.includes("Sign in") ? 403 : 500;
+		res.status(status).json({
+			error: error.message.includes("Sign in")
+				? "Server bị YouTube chặn hoàn toàn (403). Vui lòng cập nhật Cookies mới."
+				: "Lỗi Server: " + error.message,
+		});
 	}
 });
 
@@ -153,8 +180,9 @@ app.get("/api/playlist", async (req, res) => {
 
 		res.json(videos);
 	} catch (error) {
-		console.error("Playlist Error:", error.message);
-		res.status(500).json({ error: "Không thể lấy playlist." });
+		res.status(500).json({
+			error: "Không thể lấy playlist. Link Mix (RD) không được hỗ trợ.",
+		});
 	}
 });
 
@@ -167,11 +195,9 @@ app.get("/api/download", async (req, res) => {
 			return res.status(400).send("URL không hợp lệ");
 		}
 
-		// Dùng IOS Client cho việc tải xuống
-		const info = await ytdl.getInfo(url, {
-			agent,
-			playerClients: ["IOS", "ANDROID"],
-		});
+		// Bước 1: Lấy Info bằng chiến thuật tốt nhất
+		// Chúng ta gọi lại getInfoWithRetry để đảm bảo lấy được info trước khi tải
+		const { info } = await getInfoWithRetry(url);
 
 		const title = info.videoDetails.title.replace(
 			/[^\w\s\u00C0-\u1EF9]/gi,
@@ -195,8 +221,7 @@ app.get("/api/download", async (req, res) => {
 			contentType = "video/mp4";
 			filename = `${title}_HighRes_NoAudio.mp4`;
 		} else {
-			// Với IOS Client, đôi khi 'highest' trả về định dạng m3u8 (livestream).
-			// Ta cần lọc định dạng có container là mp4.
+			// Lọc video có cả tiếng và hình (thường max 720p)
 			format = ytdl.chooseFormat(info.formats, {
 				quality: "highest",
 				filter: "audioandvideo",
@@ -205,7 +230,6 @@ app.get("/api/download", async (req, res) => {
 				format = ytdl.chooseFormat(info.formats, {
 					quality: "highest",
 				});
-
 			contentType = "video/mp4";
 			filename = `${title}.mp4`;
 		}
@@ -221,11 +245,10 @@ app.get("/api/download", async (req, res) => {
 		);
 		res.header("Content-Type", contentType);
 
-		const videoStream = ytdl(url, {
+		// Bước 2: Tải xuống từ Info đã lấy được
+		const videoStream = ytdl.downloadFromInfo(info, {
 			format: format,
-			highWaterMark: 1 << 22,
-			agent: agent,
-			playerClients: ["IOS", "ANDROID"],
+			highWaterMark: 1 << 22, // 4MB Buffer
 		});
 
 		videoStream.pipe(res);
