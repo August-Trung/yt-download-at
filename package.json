@@ -1,7 +1,7 @@
 {
 	"name": "yt-downloader-backend",
-	"version": "1.0.2",
-	"description": "Backend server for YouTube Downloader",
+	"version": "2.0.0",
+	"description": "Backend server using yt-dlp for robust YouTube downloading",
 	"main": "index.js",
 	"scripts": {
 		"start": "node index.js",
@@ -10,7 +10,7 @@
 	"dependencies": {
 		"cors": "^2.8.5",
 		"express": "^4.18.2",
-		"@distube/ytdl-core": "latest",
+		"yt-dlp-exec": "^3.0.0",
 		"ytpl": "^2.3.0",
 		"node-fetch": "^2.6.7"
 	},
