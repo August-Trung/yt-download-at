@@ -22,7 +22,7 @@ try {
 	const cookiesEnv = process.env.YOUTUBE_COOKIES;
 	if (cookiesEnv) {
 		const cookies = JSON.parse(cookiesEnv);
-		// Quan trọng: Không set keepAlive để tránh lỗi trên Render
+		// Quan trọng: Không set keepAlive để tránh lỗi crash trên Render
 		agent = ytdl.createAgent(cookies);
 		console.log(`--> [INFO] Đã load Cookies thành công!`);
 	} else {
@@ -35,7 +35,7 @@ try {
 	agent = ytdl.createAgent();
 }
 
-// --- HÀM TRỢ GIÚP: CHIẾN THUẬT RETRY (QUAN TRỌNG) ---
+// --- CHIẾN THUẬT RETRY (QUAN TRỌNG) ---
 // Hàm này sẽ thử lần lượt các cách để lấy thông tin video
 const getInfoWithRetry = async (url) => {
 	const strategies = [
@@ -64,7 +64,7 @@ const getInfoWithRetry = async (url) => {
 		} catch (error) {
 			console.log(`   [FAIL] ${strategy.name}: ${error.message}`);
 			lastError = error;
-			// Nếu lỗi là do video không tồn tại thì dừng luôn, không thử cách khác
+			// Nếu lỗi là do video không tồn tại thì dừng luôn
 			if (error.message.includes("Video unavailable")) break;
 		}
 	}
@@ -79,7 +79,7 @@ const formatTime = (seconds) => {
 
 // Health Check
 app.get("/", (req, res) => {
-	res.send("Server YT Downloader (Multi-Strategy V2) is running!");
+	res.send("Server YT Downloader (Multi-Strategy V2.1) is running!");
 });
 
 // API Info
@@ -90,7 +90,6 @@ app.get("/api/info", async (req, res) => {
 			return res.status(400).json({ error: "URL không hợp lệ" });
 		}
 
-		// Gọi hàm Retry thông minh
 		const { info, strategy } = await getInfoWithRetry(url);
 		console.log(`--> Thành công với: ${strategy}`);
 
@@ -186,7 +185,7 @@ app.get("/api/playlist", async (req, res) => {
 	}
 });
 
-// --- API: Tải xuống ---
+// --- API: Tải xuống (Đã sửa logic) ---
 app.get("/api/download", async (req, res) => {
 	try {
 		const { url, type } = req.query;
@@ -196,7 +195,7 @@ app.get("/api/download", async (req, res) => {
 		}
 
 		// Bước 1: Lấy Info bằng chiến thuật tốt nhất
-		// Chúng ta gọi lại getInfoWithRetry để đảm bảo lấy được info trước khi tải
+		// Chúng ta gọi lại getInfoWithRetry để đảm bảo lấy được info sạch trước khi tải
 		const { info } = await getInfoWithRetry(url);
 
 		const title = info.videoDetails.title.replace(
@@ -245,7 +244,8 @@ app.get("/api/download", async (req, res) => {
 		);
 		res.header("Content-Type", contentType);
 
-		// Bước 2: Tải xuống từ Info đã lấy được
+		// Bước 2: Tải xuống TỪ INFO ĐÃ LẤY ĐƯỢC (downloadFromInfo)
+		// Đây là điểm mấu chốt: Không dùng ytdl(url) vì nó sẽ tự fetch info lại bằng default agent và bị chặn.
 		const videoStream = ytdl.downloadFromInfo(info, {
 			format: format,
 			highWaterMark: 1 << 22, // 4MB Buffer
